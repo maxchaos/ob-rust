@@ -30,11 +30,13 @@
 
 ;; Org-Babel support for evaluating rust code.
 ;;
-;; Much of this is modeled after `ob-C'.  Just like the `ob-C', you can specify
-;; :flags headers when compiling with the "rust run" command.  Unlike `ob-C', you
-;; can also specify :args which can be a list of arguments to pass to the
-;; binary.  If you quote the value passed into the list, it will use `ob-ref'
-;; to find the reference data.
+;; Much of this is modeled after `ob-C'.  Just like the `ob-C' library:
+;; * you can pass flags to the compiler using `:flags', and
+;; * you can specify the list of command line arguments passed to
+;;   the generated binary upon execution via `:cmdline'.
+;; If you quote the value passed into these lists, they will be treated as
+;; referenced to the actual data and will be retrieved via
+;; the elisp command `ob-ref'.
 ;;
 ;; If you do not include a main function or a package name, `ob-rust' will
 ;; provide it for you and it's the only way to properly use
@@ -44,14 +46,14 @@
 
 ;;; Requirements:
 
-;; - You must have rust and cargo installed and the rust and cargo should be in your `exec-path'
-;;   rust command.
+;; - You must have "rust" and "cargo" installed and both should be in
+;;   your `exec-path'.
 ;;
-;; - cargo-script
+;; - Optionally, "cargo-script" can be used if installed for
+;;   evaluating rust code blocks.
 ;;
-;; - `rust-mode' is also recommended for syntax highlighting and
-;;   formatting.  Not this particularly needs it, it just assumes you
-;;   have it.
+;; - Optionally, `rust-mode' is recommended for syntax highlighting and editing
+;;   of rust source code blocks.
 
 ;;; TODO:
 
@@ -61,46 +63,75 @@
 (require 'ob-eval)
 (require 'ob-ref)
 
-
 ;; optionally define a file extension for this language
+(defvar org-babel-tangle-lang-exts)
 (add-to-list 'org-babel-tangle-lang-exts '("rust" . "rs"))
+
+(defconst org-babel-header-args:rust '((cmdline . :any)
+                                       (flags   . :any))
+  "Rust-specific header arguments.")
 
 (defvar org-babel-default-header-args:rust '())
 
+(defvar org-babel-rust-compiler "rustc"
+  "Rust compiler used for building code blocks.")
+(defvar org-babel-rust-prefer-cargo-script-p nil
+  "If true, build and run the code block using cargo-script.")
+
 (defun org-babel-execute:rust (body params)
-  "Execute a block of Template code with org-babel.
-This function is called by `org-babel-execute-src-block'."
+  "Execute a block of rust code with org-babel.
+This function is called by `org-babel-execute-src-block'.
+BODY is the actual rust code to build and run whereas
+PARAMS are parameters controlling the whole process."
   (message "executing Rust source code block")
   (let* ((tmp-src-file (org-babel-temp-file "rust-src-" ".rs"))
          (processed-params (org-babel-process-params params))
-         (_flags (cdr (assoc :flags processed-params)))
-         (_args (cdr (assoc :args processed-params)))
+         (flags (cdr (assoc :flags processed-params)))
+         (flags (mapconcat 'identity
+                           (if (listp flags) flags (list flags)) " "))
+         (cmdline (cdr (assoc :cmdline processed-params)))
+         (cmdline (if cmdline (concat " " cmdline) ""))
          (coding-system-for-read 'utf-8) ;; use utf-8 with subprocesses
          (coding-system-for-write 'utf-8)
-         (wrapped-body (if (string-match-p "fn main()" body) body (concat "fn main() {\n" body "\n}"))))
+         (wrapped-body (if (string-match-p "fn main()" body)
+                           body
+                         (concat "fn main() {\n" body "\n}"))))
     (with-temp-file tmp-src-file (insert wrapped-body))
-    (let ((results
-     (org-babel-eval
-      (format "cargo script %s" tmp-src-file)
-            "")))
+    (let (results)
+      (if org-babel-rust-prefer-cargo-script-p
+          (setq results
+                (org-babel-eval
+                 (format "cargo script -- %s %s" tmp-src-file cmdline) ""))
+        (let ((tmp-bin-file
+               (org-babel-temp-file "rust-bin-" org-babel-exeext)))
+          (org-babel-eval (format "%s -o %s %s %s"
+                                  org-babel-rust-compiler
+                                  tmp-bin-file
+                                  (org-babel-process-file-name tmp-src-file)
+                                  flags) "")
+          (setq results (org-babel-eval (concat tmp-bin-file cmdline) ""))))
       (when results
         (org-babel-reassemble-table
-         (if (or (member "table" (cdr (assoc :result-params processed-params)))
-           (member "vector" (cdr (assoc :result-params processed-params))))
-       (let ((tmp-file (org-babel-temp-file "rust-")))
-         (with-temp-file tmp-file (insert (org-babel-trim results)))
-         (org-babel-import-elisp-from-file tmp-file))
-     (org-babel-read (org-babel-trim results) t))
+         (if (or (member "table"
+                         (cdr (assoc :result-params processed-params)))
+                 (member "vector"
+                         (cdr (assoc :result-params processed-params))))
+             (let ((tmp-file (org-babel-temp-file "rust-")))
+               (with-temp-file tmp-file (insert (org-babel-trim results)))
+               (org-babel-import-elisp-from-file tmp-file))
+           (org-babel-read (org-babel-trim results) t))
          (org-babel-pick-name
-    (cdr (assoc :colname-names params)) (cdr (assoc :colnames params)))
+          (cdr (assoc :colname-names params))
+          (cdr (assoc :colnames params)))
          (org-babel-pick-name
-    (cdr (assoc :rowname-names params)) (cdr (assoc :rownames params))))))))
+          (cdr (assoc :rowname-names params))
+          (cdr (assoc :rownames params))))))))
 
 ;; This function should be used to assign any variables in params in
 ;; the context of the session environment.
 (defun org-babel-prep-session:rust (_session _params)
-  "This function does nothing as Rust is a compiled language with no
-support for sessions."
+  "This function does nothing as Rust is a compiled language.
+The parameters _SESSION and _PARAMS are ignored."
   (error "Rust is a compiled languages -- no support for sessions"))
 
 (provide 'ob-rust)
